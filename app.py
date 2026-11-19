@@ -36,13 +36,11 @@ FROZEN = getattr(sys, "frozen", False)
 BASE_DIR = Path(sys.executable).resolve().parent if FROZEN else Path(__file__).resolve().parent
 ASSET_DIR = Path(getattr(sys, "_MEIPASS", "")) if FROZEN else BASE_DIR
 
-# 所有运行时产物（下载文件、ffmpeg、临时文件）统一收进一个主文件夹：
-#   Windows -> %USERPROFILE%\videoarji（可用环境变量 VIDEOGRAB_HOME 覆盖）
-#   其他平台 -> 程序目录（开发调试用）
+# 所有运行时产物（下载文件、ffmpeg、临时文件）统一放在程序所在目录：
+#   打包 exe -> exe 旁边；脚本运行 -> 脚本旁边（绿色便携，不往用户目录写东西）
+# 可用环境变量 VIDEOGRAB_HOME 覆盖到任意位置
 if os.environ.get("VIDEOGRAB_HOME"):
     DATA_DIR = Path(os.environ["VIDEOGRAB_HOME"]).expanduser()
-elif os.name == "nt":
-    DATA_DIR = Path.home() / "videoarji"
 else:
     DATA_DIR = BASE_DIR
 DATA_DIR.mkdir(parents=True, exist_ok=True)

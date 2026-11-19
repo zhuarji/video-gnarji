@@ -263,6 +263,7 @@ footer a:hover{color:var(--acc)}
         解析
       </button>
     </div>
+    <div id="linkHint" style="display:none;margin-top:9px;font-size:12.5px;line-height:1.5;color:var(--ok,#7ee2b8)"></div>
 
     <div class="sites">
       <span class="site-tag">YouTube</span><span class="site-tag">哔哩哔哩</span>
@@ -283,6 +284,18 @@ footer a:hover{color:var(--acc)}
           <label>Cookie 文本（应对需登录的内容）</label>
           <textarea id="cookies" placeholder="从浏览器扩展导出 Netscape 格式 cookies.txt 内容..."></textarea>
           <div class="tip">仅限你本人账号有权观看的内容</div>
+        </div>
+        <div class="field">
+          <label>自动读取本机浏览器 Cookie（推荐抖音 / 快手）</label>
+          <select id="browser">
+            <option value="">关闭</option>
+            <option value="chrome">Chrome / 谷歌浏览器</option>
+            <option value="edge">Edge</option>
+            <option value="firefox">Firefox</option>
+            <option value="brave">Brave</option>
+            <option value="chromium">Chromium</option>
+          </select>
+          <div class="tip">直接读取本机浏览器已登录的登录态，不用手动导出（与上方粘贴的 Cookie 二选一，粘贴的优先）</div>
         </div>
         <div class="field">
           <label>代理地址</label>
@@ -373,6 +386,39 @@ footer a:hover{color:var(--acc)}
 <script>
 let curInfo = null, curUrl = '', selFormat = 'best', subLangs = [];
 
+/* ── 从「复制分享」的整段文案里抠出真正的链接 ── */
+const URL_RE = /https?:\/\/[A-Za-z0-9\-._~:\/?#\[\]@!$&'()*+,;=%]+/i;
+const URL_TRAIL = /[，。、；：！？）】》”’.,;:!?)\]}>'"]+$/;
+
+function extractUrl(text){
+  const m = (text || '').match(URL_RE);
+  return m ? m[0].replace(URL_TRAIL, '') : '';
+}
+
+function smartLink(fix){
+  const box = document.getElementById('linkHint');
+  const v = urlInput.value.trim();
+  if(!v){ box.style.display = 'none'; return; }
+  const u = extractUrl(v);
+  if(u && u !== v && fix !== false){
+    // 抖音/快手复制出来的是「标题 + 链接 + 口令」，只保留链接
+    urlInput.value = u;
+    box.style.display = 'block';
+    box.style.color = 'var(--ok,#7ee2b8)';
+    box.innerHTML = '✓ 已从文字中识别出链接：<b>' + esc(u) + '</b>';
+  }else if(u && u !== v){
+    box.style.display = 'block';
+    box.style.color = 'var(--ok,#7ee2b8)';
+    box.innerHTML = '✓ 已识别出链接：<b>' + esc(u) + '</b>（解析时会自动使用它）';
+  }else if(u){
+    box.style.display = 'none';
+  }else{
+    box.style.display = 'block';
+    box.style.color = '#ff8a8a';
+    box.textContent = '没有识别到链接，请粘贴包含 http:// 或 https:// 地址的内容';
+  }
+}
+
 /* ── 解析 ── */
 async function parse(){
   const url = document.getElementById('url').value.trim();
@@ -386,6 +432,7 @@ async function parse(){
       headers:{'Content-Type':'application/json'},
       body: JSON.stringify({
         url, cookies:t('cookies'), proxy:t('proxy'), password:t('password'),
+        browser:t('browser'),
         single: !document.getElementById('optPlaylist').checked
       })
     });
@@ -395,7 +442,7 @@ async function parse(){
     if(d.playlist){
       renderPlaylist(d);
     }else{
-      curInfo = d; curUrl = url;
+      curInfo = d; curUrl = d.url || extractUrl(url) || url;
       renderResult(d);
     }
   }catch(e){
@@ -404,6 +451,7 @@ async function parse(){
     if(/412|风控|precondition/i.test(m)) guide = '<br><br><b>建议</b>：在「高级选项 → Cookie 文本」粘贴登录后导出的 Cookie（会自动保存）。';
     else if(/超时|timed out|网络/i.test(m)) guide = '<br><br><b>建议</b>：检查网络，或到「高级选项」填写代理地址。';
     else if(/ffmpeg/i.test(m)) guide = '<br><br><b>建议</b>：安装 ffmpeg 后重启本服务。';
+    else if(/Cookie/i.test(m)) guide = '<br><br><b>建议</b>：打开「高级选项 → 自动读取本机浏览器 Cookie」选 Chrome / Edge（先在浏览器里打开一次该网站），或手动粘贴 cookies.txt。';
     else if(/Failed to fetch|NetworkError/i.test(m)) guide = '<br><br><b>后端服务未响应</b>：请确认 start.sh / start.bat 窗口仍在运行，然后刷新本页。';
     alert('err', '解析失败：'+esc(m).replace(/\n/g,'<br>')+guide, m);
     document.getElementById('resultCard').classList.add('hidden');
@@ -433,10 +481,15 @@ function renderResult(d){
 
   // 无 ffmpeg 时说明为什么画质选项变少了
   const notice = document.getElementById('fmtNotice');
-  notice.innerHTML = (d.ffmpeg === false)
+  let extra = '';
+  if(d.native){
+    extra = '<div class="fmt-notice">✓ 已通过「' + esc(d.extractor) + '」直连解析，可下载<b>无水印原画质</b>。'
+      + '若下载失败，多半是平台临时风控，稍后重试或在「高级选项」粘贴 Cookie。</div>';
+  }
+  notice.innerHTML = extra + ((d.ffmpeg === false)
     ? '<div class="fmt-notice">⚠ 未检测到 ffmpeg，这里只列出<b>无需合并</b>的格式（自带音轨，通常最高 480p）。'+
       '安装 ffmpeg 并重启服务后，可解锁 1080p 及以上清晰度。</div>'
-    : '';
+    : '');
 
   // 格式
   const grid = document.getElementById('fmtGrid');
@@ -500,6 +553,7 @@ async function startDownload(){
         url: curUrl, format: selFormat,
         options:{
           cookies:t('cookies'), proxy:t('proxy'), password:t('password'),
+          browser:t('browser'),
           rate_limit:t('rate'), thumbnail:document.getElementById('optThumb').checked,
           subtitles:subs, embed_subs:true,
           single:!document.getElementById('optPlaylist').checked
@@ -667,14 +721,16 @@ function fmtNum(n){
 /* 交互细节 */
 const urlInput = document.getElementById('url');
 urlInput.addEventListener('keydown', e=>{ if(e.key==='Enter') parse(); });
-urlInput.addEventListener('paste', ()=>{ setTimeout(()=>{ if(urlInput.value.trim()) parse(); },60); });
+urlInput.addEventListener('input', ()=>{ if(urlInput.value.trim()) smartLink(false); });
+urlInput.addEventListener('blur', ()=>{ if(urlInput.value.trim()) smartLink(true); });
+urlInput.addEventListener('paste', ()=>{ setTimeout(()=>{ smartLink(); if(urlInput.value.trim()) parse(); },60); });
 document.getElementById('optSubs').addEventListener('change', e=>{
   document.getElementById('subLangBox').classList.toggle('hidden', !e.target.checked || !subLangs.length && !(document.getElementById('subLangs').children.length));
 });
 
 /* ── 高级选项持久化（刷新页面不丢 Cookie）───────────────── */
 const PREF_KEY = 'videograb.prefs.v1';
-const PREF_FIELDS = ['cookies','proxy','password','rate'];
+const PREF_FIELDS = ['cookies','proxy','password','rate','browser'];
 const PREF_CHECKS = ['optThumb','optSubs','optPlaylist'];
 
 function savePrefs(){

@@ -13,6 +13,9 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import gzip
+import html as html_mod
+import json
 import os
 import queue
 import re
@@ -21,6 +24,8 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.parse
+import urllib.request
 import uuid
 import zipfile
 from concurrent.futures import ThreadPoolExecutor
@@ -59,12 +64,29 @@ executor = ThreadPoolExecutor(max_workers=4)
 # ----------------------------------------------------------------------------
 # 工具函数
 # ----------------------------------------------------------------------------
-URL_RE = re.compile(r"https?://[^\s<>\"']+", re.IGNORECASE)
+# 只匹配 URL 里的合法 ASCII 字符：分享文案里的中文、emoji、全角标点会自然截断
+URL_RE = re.compile(r"https?://[A-Za-z0-9\-._~:/?#\[\]@!$&'()*+,;=%]+", re.IGNORECASE)
+URL_TRAIL = "，。、；：！？）】》”’.,;:!?)]}>'\""
+
+
+def extract_url(text: str) -> str:
+    """从「复制分享」的整段文案里提取真正的链接
+
+    抖音/快手点「复制链接」拿到的往往是一大段话，例如：
+        6.12 复制打开抖音，看看【xxx的作品】... https://v.douyin.com/iRNBho6u/ 复制此链接...
+    直接当链接解析必然失败，这里把里面的 URL 抠出来。
+    """
+    text = (text or "").strip()
+    if not text:
+        return ""
+    m = URL_RE.search(text)
+    if not m:
+        return ""
+    return m.group(0).rstrip(URL_TRAIL)
 
 
 def looks_like_url(text: str) -> bool:
-    text = text.strip()
-    return bool(URL_RE.fullmatch(text) or URL_RE.match(text))
+    return bool(extract_url(text))
 
 
 def human_bytes(n) -> str:
@@ -180,6 +202,374 @@ def base_opts() -> dict:
 
 
 # ----------------------------------------------------------------------------
+# 短视频分享页解析（抖音 / 快手）
+# ----------------------------------------------------------------------------
+# 为什么单独做：yt-dlp 的抖音解析器依赖网页接口，经常被风控拦下；快手则完全
+# 没有官方支持。这里改走「分享页」——短链跳转后的移动端页面里本身就嵌着视频
+# 直链（JSON），不需要签名、不需要登录，能拿到无水印的原画质 MP4。
+MOBILE_UA = (
+    "Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) AppleWebKit/605.1.15 "
+    "(KHTML, like Gecko) Version/17.4 Mobile/15E148 Safari/604.1"
+)
+
+SHORT_VIDEO_HOSTS = ("douyin.com", "iesdouyin.com", "kuaishou.com", "chenzhongtech.com", "gifshow.com")
+
+
+def is_short_video_site(url: str) -> bool:
+    try:
+        host = (urllib.parse.urlparse(url).hostname or "").lower()
+    except Exception:  # noqa: BLE001
+        return False
+    return any(h in host for h in SHORT_VIDEO_HOSTS)
+
+
+def _http_get(url: str, headers: dict | None = None, timeout: int = 20, limit: int = 6 * 1024 * 1024):
+    """GET 一个页面，返回 (最终地址, 文本)。自动跟随跳转、自动解 gzip。"""
+    h = {
+        "User-Agent": MOBILE_UA,
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.6",
+        "Accept-Encoding": "gzip",
+    }
+    if headers:
+        h.update(headers)
+    req = urllib.request.Request(url, headers=h)
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        raw = r.read(limit)
+        final = r.geturl()
+        enc = (r.headers.get("Content-Encoding") or "").lower()
+    if "gzip" in enc:
+        try:
+            raw = gzip.decompress(raw)
+        except Exception:  # noqa: BLE001
+            pass
+    return final, raw.decode("utf-8", "replace")
+
+
+def _json_block(text: str, marker: str, span: int = 8 * 1024 * 1024):
+    """从 HTML 里抠出 `marker = {...}` 的 JSON（按花括号配对，正确处理字符串转义）"""
+    i = text.find(marker)
+    if i < 0:
+        return None
+    j = text.find("{", i)
+    if j < 0:
+        return None
+    depth, in_str, esc = 0, False, False
+    end = min(len(text), j + span)
+    for k in range(j, end):
+        ch = text[k]
+        if in_str:
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == '"':
+                in_str = False
+        else:
+            if ch == '"':
+                in_str = True
+            elif ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    try:
+                        return json.loads(text[j : k + 1])
+                    except Exception:  # noqa: BLE001
+                        return None
+    return None
+
+
+def _deep_values(obj, keys: set):
+    """递归收集所有名为 keys 中任意一个的字段值（页面结构各版本不一，靠它兜）"""
+    found = []
+
+    def walk(o, depth=0):
+        if depth > 40:
+            return
+        if isinstance(o, dict):
+            for k, v in o.items():
+                if k in keys:
+                    found.append(v)
+                walk(v, depth + 1)
+        elif isinstance(o, list):
+            for x in o:
+                walk(x, depth + 1)
+
+    walk(obj)
+    return found
+
+
+def _first_url(v) -> str:
+    """从 str / list / dict 里挖出第一个 http(s) 地址"""
+    if isinstance(v, str):
+        return v if v.startswith("http") else ""
+    if isinstance(v, list):
+        for x in v:
+            u = _first_url(x)
+            if u:
+                return u
+    elif isinstance(v, dict):
+        for k in ("url_list", "url", "src", "srcNoMark", "playUrl", "mainUrl", "urls"):
+            if k in v:
+                u = _first_url(v[k])
+                if u:
+                    return u
+        for x in v.values():
+            u = _first_url(x)
+            if u:
+                return u
+    return ""
+
+
+MP4_RE = re.compile(r"https?://[^\"'\s<>]{5,600}?\.mp4(?:\?[^\"'\s<>]{0,600})?", re.IGNORECASE)
+
+
+def _first_mp4(html_text: str) -> str:
+    """终极兜底：页面 HTML 里出现的第一个 mp4 直链"""
+    unescaped = html_text.replace("\\u002F", "/").replace("\\/", "/")
+    m = MP4_RE.search(unescaped)
+    return m.group(0) if m else ""
+
+
+def _html_title(html_text: str, suffix: str = "") -> str:
+    m = re.search(r"<title[^>]*>(.*?)</title>", html_text, re.S | re.IGNORECASE)
+    t = html_mod.unescape(m.group(1)).strip() if m else ""
+    if suffix:
+        t = re.sub(rf"\s*[-–|]\s*{suffix}.*$", "", t)
+    t = re.sub(r"\s+", " ", t)
+    return t[:120] or "未命名视频"
+
+
+def _douyin_id(url: str) -> str:
+    m = re.search(r"/(?:share/)?video/(\d{6,})", url) or re.search(
+        r"[?&](?:modal_id|vid|aweme_id)=(\d{6,})", url
+    )
+    return m.group(1) if m else ""
+
+
+def _douyin_from_item(item: dict, page: str, vid: str) -> dict | None:
+    video = item.get("video") or {}
+    mp4 = ""
+    for key in ("play_addr", "play_addr_h264", "play_addr_265", "play_addr_lowbr"):
+        mp4 = _first_url(video.get(key) or {})
+        if mp4:
+            break
+    if not mp4:
+        mp4 = _first_url(video.get("download_addr") or {})
+    if not mp4:
+        mp4 = _first_mp4(page)
+    if not mp4:
+        return None
+    # playwm 是带水印版本，换成 play 即无水印
+    mp4 = mp4.replace("/playwm/", "/play/").replace("playwm", "play")
+
+    duration = video.get("duration")
+    return {
+        "site": "抖音",
+        "id": str(item.get("aweme_id") or vid or "douyin"),
+        "title": (item.get("desc") or "").strip() or _html_title(page, "抖音"),
+        "uploader": ((item.get("author") or {}).get("nickname") or "").strip(),
+        "duration": round(duration / 1000) if isinstance(duration, (int, float)) and duration else None,
+        "thumbnail": _first_url(video.get("cover") or video.get("origin_cover") or {}),
+        "url": mp4,
+        "referer": "https://www.douyin.com/",
+    }
+
+
+def parse_douyin(url: str, timeout: int = 20) -> dict | None:
+    """抖音：短链跳转 → 分享页 _ROUTER_DATA → play_addr（无水印）
+
+    依次尝试多个页面：先分享页，再短链跳转后的原页面。
+    平台偶尔会返回风控/空数据页，所以任何一个页面解析不出内容就换下一个。
+    """
+    final, page0 = _http_get(url, timeout=timeout)
+    vid = _douyin_id(final) or _douyin_id(url)
+
+    pages: list[tuple[str, str]] = []
+    if vid:
+        try:
+            f2, p2 = _http_get(
+                f"https://www.iesdouyin.com/share/video/{vid}/",
+                headers={"Referer": "https://www.douyin.com/"},
+                timeout=timeout,
+            )
+            if "_ROUTER_DATA" in p2 or "item_list" in p2:
+                pages.append((f2, p2))
+        except Exception:  # noqa: BLE001
+            pass
+    pages.append((final, page0))
+
+    for f_, page in pages:
+        data = _json_block(page, "window._ROUTER_DATA") or _json_block(page, "_ROUTER_DATA")
+        item = None
+        if data:
+            for v in _deep_values(data, {"item_list"}):
+                if isinstance(v, list) and v and isinstance(v[0], dict):
+                    item = v[0]
+                    break
+            if item is None:
+                for v in _deep_values(data, {"aweme_detail", "aweme_info"}):
+                    if isinstance(v, dict) and v.get("video"):
+                        item = v
+                        break
+        if item:
+            got = _douyin_from_item(item, page, vid)
+            if got:
+                return got
+        mp4 = _first_mp4(page)
+        if mp4:
+            return {
+                "site": "抖音",
+                "id": vid or "douyin",
+                "title": _html_title(page, "抖音"),
+                "uploader": "",
+                "duration": None,
+                "thumbnail": "",
+                "url": mp4.replace("playwm", "play"),
+                "referer": "https://www.douyin.com/",
+            }
+    return None
+
+
+def _kuaishou_id(url: str) -> str:
+    m = re.search(
+        r"/(?:short-video|video|photo|fw/photo|profile/[^/]+)/([A-Za-z0-9_\-]{6,})", url
+    )
+    return m.group(1) if m else ""
+
+
+def parse_kuaishou(url: str, timeout: int = 20) -> dict | None:
+    """快手：短链跳转 → 移动版页面 INIT_STATE → mainMvUrls（无水印）
+
+    同样按候选页面顺序尝试，解析不出来就换下一个（含短链原始页面）。
+    """
+    final, page0 = _http_get(url, timeout=timeout)
+    pid = _kuaishou_id(final) or _kuaishou_id(url)
+
+    pages: list[tuple[str, str]] = []
+    if pid:
+        candidates = (
+            f"https://v.m.chenzhongtech.com/fw/photo/{pid}",
+            f"https://www.kuaishou.com/short-video/{pid}",
+        )
+        for cand in candidates:
+            try:
+                f2, h2 = _http_get(cand, headers={"Referer": "https://www.kuaishou.com/"}, timeout=timeout)
+            except Exception:  # noqa: BLE001
+                continue
+            if "INIT_STATE" in h2 or "mainMvUrls" in h2:
+                pages.append((f2, h2))
+    pages.append((final, page0))
+
+    for f_, page in pages:
+        data = (
+            _json_block(page, "window.INIT_STATE")
+            or _json_block(page, "INIT_STATE")
+            or _json_block(page, "window.__APOLLO_STATE__")
+        )
+        mp4, caption, cover = "", "", ""
+        if data:
+            for v in _deep_values(data, {"mainMvUrls", "mainMvUrl", "playUrls", "playUrl", "srcNoMark"}):
+                mp4 = _first_url(v)
+                if mp4:
+                    break
+            caps = [v for v in _deep_values(data, {"caption"}) if isinstance(v, str) and v.strip()]
+            if caps:
+                caption = caps[0]
+            covers = [v for v in _deep_values(data, {"coverUrls", "coverUrl", "poster"}) if _first_url(v)]
+            if covers:
+                cover = _first_url(covers[0])
+
+        if not mp4:
+            mp4 = _first_mp4(page)
+        if not mp4:
+            continue
+
+        return {
+            "site": "快手",
+            "id": pid or "kuaishou",
+            "title": (caption or "").strip() or _html_title(page, "快手"),
+            "uploader": "",
+            "duration": None,
+            "thumbnail": cover,
+            "url": mp4,
+            "referer": "https://www.kuaishou.com/",
+        }
+    return None
+
+
+def native_extract(url: str) -> dict | None:
+    """抖音/快手分享页直连解析；其他站点返回 None（继续走 yt-dlp）"""
+    low = url.lower()
+    try:
+        if "douyin.com" in low:
+            return parse_douyin(url)
+        if any(k in low for k in ("kuaishou.com", "chenzhongtech.com", "gifshow.com")):
+            return parse_kuaishou(url)
+    except Exception as e:  # noqa: BLE001
+        print(f"  [native] {type(e).__name__}: {e}")
+    return None
+
+
+def resolve_canonical(url: str) -> str:
+    """把分享短链换成 yt-dlp 认得的规范地址（抖音只认 www.douyin.com/video/<id>）"""
+    if "douyin.com" not in url.lower():
+        return url
+    vid = _douyin_id(url)
+    if not vid:
+        try:
+            final, _ = _http_get(url, timeout=12)
+            vid = _douyin_id(final)
+        except Exception:  # noqa: BLE001
+            pass
+    return f"https://www.douyin.com/video/{vid}" if vid else url
+
+
+# 可从中自动读取登录态的浏览器（yt-dlp --cookies-from-browser 支持的名称）
+BROWSER_NAMES = {"chrome", "edge", "firefox", "brave", "opera", "vivaldi", "chromium", "safari", "whale"}
+
+
+def apply_cookies(opts: dict, cookies_text: str, browser: str) -> str | None:
+    """给 yt-dlp 挂上 Cookie：优先用户粘贴的文本，其次自动读本机浏览器
+
+    抖音的网页接口需要带签名的 Cookie（s_v_web_id / msToken / ttwid），
+    纯 HTTP 抓取拿不到，所以「自动读取本机浏览器」是它最省事的可用路径。
+    返回临时 cookie 文件路径（调用方负责清理），无则 None。
+    """
+    cookies_text = (cookies_text or "").strip()
+    if cookies_text:
+        path = DOWNLOAD_DIR / f".cookies_{uuid.uuid4().hex}.txt"
+        path.write_text(cookies_text, encoding="utf-8")
+        opts["cookiefile"] = str(path)
+        return str(path)
+    b = (browser or "").strip().lower()
+    if b in BROWSER_NAMES:
+        opts["cookiesfrombrowser"] = (b,)
+    return None
+
+
+# 分享页解析结果缓存：/api/info 里解析好，/api/download 按链接取用
+NATIVE_CACHE: dict[str, dict] = {}
+NATIVE_TTL = 1800
+
+
+def cache_native(url: str, data: dict) -> None:
+    NATIVE_CACHE[url] = {"t": time.time(), "data": data}
+    # 顺手清掉过期项，避免长跑进程越攒越多
+    now = time.time()
+    for k in [k for k, v in NATIVE_CACHE.items() if now - v["t"] > NATIVE_TTL]:
+        NATIVE_CACHE.pop(k, None)
+
+
+def get_native(url: str) -> dict | None:
+    item = NATIVE_CACHE.get(url)
+    if not item or time.time() - item["t"] > NATIVE_TTL:
+        return None
+    return item["data"]
+
+
+# ----------------------------------------------------------------------------
 # 解析视频信息
 # ----------------------------------------------------------------------------
 @app.get("/api/status")
@@ -199,11 +589,13 @@ async def api_status():
 
 @app.post("/api/info")
 async def api_info(payload: dict):
-    url = (payload.get("url") or "").strip()
-    if not url:
+    raw = (payload.get("url") or "").strip()
+    if not raw:
         raise HTTPException(400, "请提供视频链接")
-    if not looks_like_url(url):
-        raise HTTPException(400, "链接格式不正确")
+    # 抖音/快手「复制链接」常带着标题文案一起复制，这里先把真正的 URL 抠出来
+    url = extract_url(raw)
+    if not url:
+        raise HTTPException(400, "没有识别到有效链接。请粘贴包含 http:// 或 https:// 地址的内容")
 
     pw = (payload.get("password") or "").strip()
     want_playlist = not bool(payload.get("single", True))
@@ -232,31 +624,80 @@ async def api_info(payload: dict):
         opts["proxy"] = proxy
 
     cookies = (payload.get("cookies") or "").strip()
-    cookiefile = None
-    if cookies:
-        cookiefile = DOWNLOAD_DIR / f".cookies_{uuid.uuid4().hex}.txt"
-        cookiefile.write_text(cookies, encoding="utf-8")
-        opts["cookiefile"] = str(cookiefile)
+    browser = (payload.get("browser") or "").strip()
+    _tmp = apply_cookies(opts, cookies, browser)
+    cookiefile = Path(_tmp) if _tmp else None
+
+    loop = asyncio.get_event_loop()
+
+    # 抖音/快手：先走分享页直连（免登录、无水印、成功率高），失败再交给 yt-dlp
+    if is_short_video_site(url):
+        native = await loop.run_in_executor(executor, native_extract, url)
+        if native:
+            cache_native(url, native)
+            ff = ffmpeg_path() is not None
+            fmts = [
+                {
+                    "id": "native",
+                    "label": "原画质（无水印）",
+                    "note": f"来自{native['site']}分享页，直接保存 MP4",
+                    "kind": "video",
+                    "recommend": True,
+                }
+            ]
+            if ff:
+                fmts.append(
+                    {
+                        "id": "native_mp3",
+                        "label": "仅音频（MP3 320k）",
+                        "note": "下载后自动转码",
+                        "kind": "audio",
+                    }
+                )
+            return {
+                "playlist": False,
+                "ffmpeg": ff,
+                "native": True,
+                "url": url,
+                "id": native["id"],
+                "title": native["title"],
+                "uploader": native["uploader"],
+                "duration": native["duration"],
+                "duration_h": human_duration(native["duration"]),
+                "view_count": None,
+                "thumbnail": native["thumbnail"],
+                "extractor": f"{native['site']}（分享页）",
+                "description": "",
+                "formats": fmts,
+                "raw_formats": [],
+                "subtitles": [],
+            }
+
+    # 分享页直连失败后：把抖音短链换成 www.douyin.com/video/<id>，
+    # 否则 yt-dlp 不认 v.douyin.com 这种地址，会直接报「暂不支持该链接」
+    if is_short_video_site(url):
+        url = await loop.run_in_executor(executor, resolve_canonical, url)
 
     def extract(o):
         with yt_dlp.YoutubeDL(o) as ydl:
             return ydl.extract_info(url, download=False)
-
-    loop = asyncio.get_event_loop()
     try:
         info = await loop.run_in_executor(executor, extract, opts)
         if info is None and opts.get("ignoreerrors"):
             # 播放列表容错模式会静默失败，改用严格模式再跑一次，把真实原因抛出来
             info = await loop.run_in_executor(executor, extract, {**opts, "ignoreerrors": False})
     except yt_dlp.utils.DownloadError as e:
-        raw = str(e).replace("ERROR:", "").strip()
-        human = friendly_error(raw)
-        raise HTTPException(
-            400,
-            human
-            if human != raw
-            else f"{raw[-200:]}\n（常见原因：网络不通、链接失效、需登录后查看或被平台风控拦截）",
-        )
+        msg = str(e).replace("ERROR:", "").strip()
+        human = friendly_error(msg)
+        tail = "（常见原因：网络不通、链接失效、需登录后查看或被平台风控拦截）"
+        if "douyin" in url.lower():
+            tail = (
+                "（抖音的风控要求「带签名的 Cookie」：请到「高级选项 → 自动读取本机浏览器 Cookie」"
+                "选 Chrome / Edge，或在浏览器里打开一次抖音后重试；也可手动粘贴 cookies.txt 内容）"
+            )
+        elif is_short_video_site(url):
+            tail = "（快手解析失败：请确认链接是公开视频，或到「高级选项」粘贴 Cookie 后重试）"
+        raise HTTPException(400, human if human != msg else f"{msg[-200:]}\n{tail}")
     except Exception as e:  # noqa: BLE001
         raise HTTPException(500, f"解析出错：{e}")
     finally:
@@ -283,7 +724,7 @@ async def api_info(payload: dict):
             "entries": entries,
         }
 
-    return {"playlist": False, **format_info(info, has_ffmpeg)}
+    return {"playlist": False, "url": url, **format_info(info, has_ffmpeg)}
 
 
 def friendly_error(msg: str) -> str:
@@ -292,6 +733,16 @@ def friendly_error(msg: str) -> str:
     # 注意：状态码必须排在语义匹配之前，且关键词要足够精确
     # （曾踩坑：用 "age" 匹配会命中 webpage/message 里的字母，把 412 误报成年龄限制）
     table = [
+        (
+            "could not find",
+            "没找到浏览器的 Cookie 数据库：请确认已安装并打开过该浏览器，"
+            "或改用上方「Cookie 文本」手动粘贴",
+        ),
+        (
+            "failed to decrypt",
+            "浏览器 Cookie 解密失败（Chrome 新版加密）：请改用「Cookie 文本」手动粘贴",
+        ),
+        ("unsupported browser", "这个浏览器暂不支持自动读取，请改选 Chrome / Edge / Firefox"),
         ("http error 412", "平台风控拦截（HTTP 412）：未登录或对高频请求限流。建议粘贴 Cookie 后重试"),
         ("http error 403", "访问被拒绝（403）：可能需要 Cookie，或当前 IP 被限制"),
         ("http error 404", "链接不存在（404）：请检查链接是否复制完整、视频是否已删除"),
@@ -654,11 +1105,8 @@ def run_download(task_id: str, url: str, fmt: str, options: dict) -> None:
             }
         ]
 
-    cookiefile = None
-    if options.get("cookies"):
-        cookiefile = out_dir / f".cookies_{task_id}.txt"
-        cookiefile.write_text(options["cookies"], encoding="utf-8")
-        opts["cookiefile"] = str(cookiefile)
+    _tmp = apply_cookies(opts, options.get("cookies"), options.get("browser"))
+    cookiefile = Path(_tmp) if _tmp else None
 
     attach_progress(opts, task_id)
 
@@ -726,6 +1174,125 @@ def run_download(task_id: str, url: str, fmt: str, options: dict) -> None:
         task["finished"] = True
 
 
+class _Cancelled(Exception):
+    pass
+
+
+def safe_name(s: str) -> str:
+    s = re.sub(r'[\\/:*?"<>|\r\n\t]+', " ", s or "").strip()
+    s = re.sub(r"\s+", " ", s)
+    return s[:100] or "video"
+
+
+def parse_rate(v) -> int:
+    """把 '2M' / '500K' 解析成 bytes/s；非法值返回 0（不限速）"""
+    m = re.match(r"^\s*([\d.]+)\s*([KMG]?)", str(v or ""), re.I)
+    if not m:
+        return 0
+    try:
+        n = float(m.group(1))
+    except ValueError:
+        return 0
+    mult = {"": 1, "K": 1024, "M": 1024**2, "G": 1024**3}[m.group(2).upper()]
+    return int(n * mult)
+
+
+def run_direct(task_id: str, page_url: str, fmt: str, options: dict) -> None:
+    """分享页直链下载（抖音/快手）：直接 HTTP 拉 MP4，进度/取消与 yt-dlp 任务一致"""
+    task = TASKS[task_id]
+    q = task["queue"]
+
+    def push(msg, final=False):
+        snapshot(task, msg)
+        q.put_nowait(msg)
+        if final:
+            task["finished"] = True
+
+    info = get_native(page_url)
+    if not info:
+        push({"status": "error", "msg": "解析结果已过期，请重新点击「解析」后再下载"}, final=True)
+        return
+
+    out_dir = DOWNLOAD_DIR / task_id
+    out_dir.mkdir(parents=True, exist_ok=True)
+    title = safe_name(info.get("title") or "video")
+    vid = safe_name(str(info.get("id") or task_id))
+    mp4_path = out_dir / f"{title} [{vid}].mp4"
+
+    headers = {
+        "User-Agent": MOBILE_UA,
+        "Referer": info.get("referer") or page_url,
+        "Accept": "*/*",
+        "Accept-Encoding": "identity",
+    }
+    rate = parse_rate(options.get("rate_limit"))
+
+    try:
+        push({"status": "downloading", "percent": 0, "msg": "开始下载…"})
+        req = urllib.request.Request(info["url"], headers=headers)
+        with urllib.request.urlopen(req, timeout=30) as r, open(mp4_path, "wb") as f:
+            total = int(r.headers.get("Content-Length") or 0)
+            done = 0
+            t0 = time.time()
+            last_push = 0.0
+            while True:
+                if task.get("cancel"):
+                    raise _Cancelled
+                chunk = r.read(256 * 1024)
+                if not chunk:
+                    break
+                f.write(chunk)
+                done += len(chunk)
+                if rate:
+                    expect = done / rate
+                    spent = time.time() - t0
+                    if expect > spent:
+                        time.sleep(min(expect - spent, 0.5))
+                now = time.time()
+                if now - last_push >= 0.4:
+                    last_push = now
+                    elapsed = max(now - t0, 0.001)
+                    speed = done / elapsed
+                    eta = int((total - done) / speed) if total and speed > 0 else 0
+                    push(
+                        {
+                            "status": "downloading",
+                            "percent": round(done / total * 100, 1) if total else 0,
+                            "speed": human_bytes(speed) + "/s",
+                            "eta": f"{eta // 60:02d}:{eta % 60:02d}" if total else "",
+                            "size": human_bytes(total) if total else "-",
+                            "downloaded": human_bytes(done),
+                        }
+                    )
+
+        if mp4_path.stat().st_size < 1024:
+            raise RuntimeError("服务器返回的文件异常（可能被平台风控拦截）")
+
+        if fmt == "native_mp3":
+            ff = ffmpeg_path()
+            if not ff:
+                push({"status": "error", "msg": "未检测到 ffmpeg，无法转换 MP3"}, final=True)
+                return
+            push({"status": "processing", "percent": 100, "msg": "正在提取音频…"})
+            mp3_path = mp4_path.with_suffix(".mp3")
+            proc = subprocess.run(
+                [ff, "-y", "-loglevel", "error", "-i", str(mp4_path), "-vn", "-b:a", "320k", str(mp3_path)],
+                capture_output=True,
+            )
+            if proc.returncode != 0 or not mp3_path.exists():
+                push({"status": "error", "msg": "MP3 转码失败，可改选「原画质」下载"}, final=True)
+                return
+            mp4_path.unlink(missing_ok=True)
+
+        push({"status": "done", "percent": 100}, final=True)
+    except _Cancelled:
+        mp4_path.unlink(missing_ok=True)
+        push({"status": "cancelled", "msg": "已取消"}, final=True)
+    except Exception as e:  # noqa: BLE001
+        mp4_path.unlink(missing_ok=True)
+        push({"status": "error", "msg": f"下载失败：{e}"}, final=True)
+
+
 FALLBACK_STEPS = (1080, 720, 480, 360)
 
 
@@ -763,11 +1330,15 @@ def download_error(e: Exception, url: str, options: dict) -> str:
 
 @app.post("/api/download")
 async def api_download(payload: dict):
-    url = (payload.get("url") or "").strip()
+    url = extract_url(payload.get("url") or "")
     if not url:
         raise HTTPException(400, "缺少链接")
 
     fmt = (payload.get("format") or "best").strip()
+    options = payload.get("options") or {}
+    if fmt in ("native", "native_mp3") and not get_native(url):
+        raise HTTPException(400, "解析结果已过期，请重新点击「解析」后再下载")
+
     task_id = uuid.uuid4().hex[:12]
 
     TASKS[task_id] = {
@@ -779,11 +1350,8 @@ async def api_download(payload: dict):
         "state": {"status": "starting", "percent": 0, "msg": "任务已创建，等待下载…"},
     }
 
-    threading.Thread(
-        target=run_download,
-        args=(task_id, url, fmt, payload.get("options") or {}),
-        daemon=True,
-    ).start()
+    target = run_direct if fmt in ("native", "native_mp3") else run_download
+    threading.Thread(target=target, args=(task_id, url, fmt, options), daemon=True).start()
 
     return {"task_id": task_id}
 

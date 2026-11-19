@@ -18,8 +18,8 @@ GitHub Release 提供三种形态（见 https://github.com/zhuarji/video-gnarji/
 
 | 形态 | 文件 | 说明 |
 |---|---|---|
-| 标准安装器 | `Setup-VideoGrab.exe` | 像普通软件一样：向导式安装，所有文件（含 exe）装进一个独立文件夹，自动建桌面/开始菜单快捷方式，带卸载程序。数据统一放在安装目录旁的 `videoarji\` 里 |
-| 单文件版 | `VideoGrab-Windows.exe` | 免安装，放到任意文件夹双击即可，数据在旁边 `videoarji\` 里 |
+| 标准安装器 | `Setup-VideoGrab.exe` | 像普通软件一样：向导式安装，默认装到 `盘号:\VideoArji`（可自选盘符/路径），exe、下载视频（`downloads\`）、ffmpeg 全部在该文件夹内，自动建桌面/开始菜单快捷方式，带卸载程序 |
+| 单文件版 | `VideoGrab-Windows.exe` | 免安装，放到任意文件夹双击即可，数据在 exe 旁边 |
 | macOS 版 | `VideoGrab-macOS` | 单文件，`chmod +x` 后运行 |
 
 ### 手动启动

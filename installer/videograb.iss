@@ -12,15 +12,16 @@
 AppName=VideoGrab
 AppVersion={#AppVersion}
 AppVerName=VideoGrab {#AppVersion}
-DefaultDirName={autopf}\VideoGrab
+DefaultDirName={sd}\VideoArji
+DirExistsWarning=no
+UsePreviousAppDir=yes
 DefaultGroupName=VideoGrab
 OutputDir=installer-output
 OutputBaseFilename=Setup-VideoGrab
 Compression=lzma2/max
 SolidCompression=yes
 ArchitecturesInstallIn64BitMode=x64compatible
-PrivilegesRequired=lowest
-PrivilegesRequiredOverridesAllowed=dialog
+PrivilegesRequired=admin
 UninstallDisplayName=VideoGrab
 WizardStyle=modern
 
@@ -40,4 +41,4 @@ Name: "{autodesktop}\VideoGrab"; Filename: "{app}\VideoGrab.exe"; Tasks: desktop
 Filename: "{app}\VideoGrab.exe"; Description: "Launch VideoGrab now"; Flags: nowait postinstall skipifsilent
 
 [Messages]
-WelcomeLabel2=This will install VideoGrab on your computer.%n%nAll files (including the exe) go into ONE independent folder. Your downloads are kept in a "videoarji" subfolder next to the program.%n%nTip: keep the default install path, or choose a folder on D:\ etc. Avoid C:\Program Files (the program writes data next to itself).
+WelcomeLabel2=This will install VideoGrab on your computer.%n%nEverything goes into ONE independent folder (default: C:\VideoArji - you can pick any drive, e.g. D:\VideoArji). The exe, your downloads and ffmpeg all live inside that folder.

@@ -35,7 +35,18 @@ from fastapi.staticfiles import StaticFiles
 FROZEN = getattr(sys, "frozen", False)
 BASE_DIR = Path(sys.executable).resolve().parent if FROZEN else Path(__file__).resolve().parent
 ASSET_DIR = Path(getattr(sys, "_MEIPASS", "")) if FROZEN else BASE_DIR
-DOWNLOAD_DIR = BASE_DIR / "downloads"
+
+# 所有运行时产物（下载文件、ffmpeg、临时文件）统一收进一个主文件夹：
+#   Windows -> %USERPROFILE%\videoarji（可用环境变量 VIDEOGRAB_HOME 覆盖）
+#   其他平台 -> 程序目录（开发调试用）
+if os.environ.get("VIDEOGRAB_HOME"):
+    DATA_DIR = Path(os.environ["VIDEOGRAB_HOME"]).expanduser()
+elif os.name == "nt":
+    DATA_DIR = Path.home() / "videoarji"
+else:
+    DATA_DIR = BASE_DIR
+DATA_DIR.mkdir(parents=True, exist_ok=True)
+DOWNLOAD_DIR = DATA_DIR / "downloads"
 DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
 app = FastAPI(title="VideoGrab", docs_url=None, redoc_url=None)
@@ -114,31 +125,40 @@ def _download(src: str, dest: Path, tmp: Path) -> None:
         shutil.move(str(tmp), dest)
 
 
+def ffmpeg_path():
+    """返回可用的 ffmpeg 可执行文件路径；优先系统 PATH，其次主文件夹"""
+    p = shutil.which("ffmpeg")
+    if p:
+        return p
+    for cand in (DATA_DIR / "ffmpeg.exe", BASE_DIR / "ffmpeg.exe"):
+        if cand.exists():
+            return str(cand)
+    return None
+
+
 def ensure_ffmpeg() -> bool:
-    """检测 ffmpeg；Windows 打包版缺失时自动下载。返回是否可用。"""
-    if shutil.which("ffmpeg") or (BASE_DIR / "ffmpeg.exe").exists():
+    """检测 ffmpeg；Windows 打包版缺失时自动下载到主文件夹。返回是否可用。"""
+    if ffmpeg_path():
         return True
     if os.name != "nt":
         return False
-    print("  首次运行：正在自动下载 ffmpeg（约 80MB，仅此一次）…")
-    tmp = BASE_DIR / "ffmpeg.dl.tmp"
+    print(f"  首次运行：正在自动下载 ffmpeg（约 80MB）到 {DATA_DIR} …")
+    tmp = DATA_DIR / "ffmpeg.dl.tmp"
     for src in FFMPEG_SOURCES:
         try:
-            _download(src, BASE_DIR / "ffmpeg.exe", tmp)
-            print("  ✓ ffmpeg 就绪（已保存到程序目录）")
+            _download(src, DATA_DIR / "ffmpeg.exe", tmp)
+            print("  ✓ ffmpeg 就绪")
             return True
         except Exception as e:  # noqa: BLE001
             print(f"  ✗ 此源下载失败（{type(e).__name__}），尝试备用源…")
             tmp.unlink(missing_ok=True)
-    print("  ✗ 自动下载失败：请手动下载 ffmpeg.exe 放到本程序同目录后重新打开")
+    print(f"  ✗ 自动下载失败：请手动下载 ffmpeg.exe 放到 {DATA_DIR} 后重新打开")
     return False
 
 
 def base_opts() -> dict:
     """所有 yt-dlp 调用的公共参数"""
-    ffmpeg = shutil.which("ffmpeg")
-    if not ffmpeg and (BASE_DIR / "ffmpeg.exe").exists():
-        ffmpeg = str(BASE_DIR / "ffmpeg.exe")
+    ffmpeg = ffmpeg_path()
     opts = {
         "quiet": True,
         "no_warnings": True,
@@ -170,7 +190,12 @@ async def api_status():
         version = yt_dlp.version.__version__
     except Exception:  # noqa: BLE001
         version = "unknown"
-    return {"ffmpeg": shutil.which("ffmpeg") is not None, "ytdlp": version}
+    return {
+        "ffmpeg": ffmpeg_path() is not None,
+        "ytdlp": version,
+        "data_dir": str(DATA_DIR),
+        "download_dir": str(DOWNLOAD_DIR),
+    }
 
 
 @app.post("/api/info")
@@ -246,7 +271,7 @@ async def api_info(payload: dict):
             "② 平台需要登录（请到「高级选项」粘贴 Cookie）；③ 网络不通或需代理。",
         )
 
-    has_ffmpeg = shutil.which("ffmpeg") is not None
+    has_ffmpeg = ffmpeg_path() is not None
 
     # 播放列表：直接展开为多个条目
     if info.get("_type") == "playlist" and info.get("entries"):
@@ -852,6 +877,7 @@ if __name__ == "__main__":
 
         _th.Timer(1.8, lambda: webbrowser.open(f"http://localhost:{a.port}")).start()
         print(f"  服务运行中：http://localhost:{a.port}")
-        print("  关闭本窗口即停止服务。下载的文件在旁边的 downloads 文件夹里。")
+        print(f"  下载目录：{DOWNLOAD_DIR}")
+        print("  关闭本窗口即停止服务。")
 
     uvicorn.run(app, host=a.host, port=a.port, log_level="info")

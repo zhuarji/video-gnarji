@@ -182,6 +182,7 @@ h1 span{background:linear-gradient(135deg,var(--acc),var(--acc2));-webkit-backgr
 }
 .env-box b{color:var(--txt);font-weight:600}
 .env-ok{color:var(--ok)} .env-no{color:var(--err)}
+.env-path{color:var(--dim2);word-break:break-all}
 .copy-btn{margin-top:8px}
 .fmt-notice{
   font-size:12.5px;color:#e0c290;background:rgba(245,165,36,.09);
@@ -722,7 +723,8 @@ async function checkEnv(){
     const ff = s.ffmpeg
       ? '<span class="env-ok">✓ 已安装</span>'
       : '<span class="env-no">✗ 未安装 —— 高清合并与 MP3 转换不可用</span>';
-    box.innerHTML = `<b>环境状态</b><br>yt-dlp ${esc(s.ytdlp||'未知')} · ffmpeg ${ff}`;
+    box.innerHTML = `<b>环境状态</b><br>yt-dlp ${esc(s.ytdlp||'未知')} · ffmpeg ${ff}`+
+      (s.download_dir ? `<br><span class="env-path">下载目录：${esc(s.download_dir)}</span>` : '');
 
     if(!s.ffmpeg){
       alert('err',

@@ -81,10 +81,37 @@ def human_duration(s) -> str:
 # ----------------------------------------------------------------------------
 # ffmpeg 自动补齐（打包版 Windows：首次运行自动下载 ffmpeg.exe 到程序目录）
 # ----------------------------------------------------------------------------
+# npmmirror（淘宝 npm 镜像）国内速度最优；后两个为 GitHub 官方源及其加速镜像
 FFMPEG_SOURCES = [
-    "https://github.com/BtbN/FFmpeg-Builds/releases/latest/download/ffmpeg-master-latest-win64-gpl.zip",
+    "https://registry.npmmirror.com/-/binary/ffmpeg-static/b6.1.1/ffmpeg-win32-x64",
+    "https://registry.npmmirror.com/-/binary/ffmpeg-static/b6.0/ffmpeg-win32-x64",
     "https://ghproxy.net/https://github.com/BtbN/FFmpeg-Builds/releases/latest/download/ffmpeg-master-latest-win64-gpl.zip",
+    "https://github.com/BtbN/FFmpeg-Builds/releases/latest/download/ffmpeg-master-latest-win64-gpl.zip",
 ]
+
+
+def _download(src: str, dest: Path, tmp: Path) -> None:
+    """带百分比进度地下载 src；.zip 结尾的源会顺带解出 ffmpeg.exe。"""
+    import urllib.request
+
+    last = [0]
+
+    def report(n: int, block: int, total: int) -> None:
+        if total <= 0:
+            return
+        pct = min(100, int(n * block * 100 / total))
+        if pct - last[0] >= 10:
+            last[0] = pct
+            print(f"    {pct}%  ({n * block // 1048576}/{total // 1048576} MB)")
+
+    urllib.request.urlretrieve(src, tmp, reporthook=report)
+    if src.endswith(".zip"):
+        with zipfile.ZipFile(tmp) as zf:
+            member = next(n for n in zf.namelist() if n.endswith("/ffmpeg.exe"))
+            with zf.open(member) as fr, open(dest, "wb") as fw:
+                shutil.copyfileobj(fr, fw, 1024 * 1024)
+    else:
+        shutil.move(str(tmp), dest)
 
 
 def ensure_ffmpeg() -> bool:
@@ -93,18 +120,11 @@ def ensure_ffmpeg() -> bool:
         return True
     if os.name != "nt":
         return False
-    print("  首次运行：正在自动下载 ffmpeg（约 90MB，仅此一次，请耐心等待）…")
-    import urllib.request
-
-    tmp = BASE_DIR / "ffmpeg.zip"
+    print("  首次运行：正在自动下载 ffmpeg（约 80MB，仅此一次）…")
+    tmp = BASE_DIR / "ffmpeg.dl.tmp"
     for src in FFMPEG_SOURCES:
         try:
-            urllib.request.urlretrieve(src, tmp)
-            with zipfile.ZipFile(tmp) as zf:
-                member = next(n for n in zf.namelist() if n.endswith("/ffmpeg.exe"))
-                with zf.open(member) as fr, open(BASE_DIR / "ffmpeg.exe", "wb") as fw:
-                    shutil.copyfileobj(fr, fw, 1024 * 1024)
-            tmp.unlink(missing_ok=True)
+            _download(src, BASE_DIR / "ffmpeg.exe", tmp)
             print("  ✓ ffmpeg 就绪（已保存到程序目录）")
             return True
         except Exception as e:  # noqa: BLE001

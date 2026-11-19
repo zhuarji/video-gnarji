@@ -12,6 +12,16 @@ bash start.sh 3000       # 指定端口
 
 然后浏览器打开 http://localhost:8080
 
+## Windows 桌面版
+
+GitHub Release 提供三种形态（见 https://github.com/zhuarji/video-gnarji/releases ）：
+
+| 形态 | 文件 | 说明 |
+|---|---|---|
+| 标准安装器 | `Setup-VideoGrab.exe` | 像普通软件一样：向导式安装，所有文件（含 exe）装进一个独立文件夹，自动建桌面/开始菜单快捷方式，带卸载程序。数据统一放在安装目录旁的 `videoarji\` 里 |
+| 单文件版 | `VideoGrab-Windows.exe` | 免安装，放到任意文件夹双击即可，数据在旁边 `videoarji\` 里 |
+| macOS 版 | `VideoGrab-macOS` | 单文件，`chmod +x` 后运行 |
+
 ### 手动启动
 
 ```bash

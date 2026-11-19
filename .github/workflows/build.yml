@@ -50,11 +50,25 @@ jobs:
             cp dist/VideoGrab "${{ matrix.artifact }}"
           fi
 
+      - name: Build installer (Inno Setup, Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) {
+            choco install innosetup -y
+            $iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
+          }
+          & $iscc "installer/videograb.iss" "/DAppVersion=$env:GITHUB_REF_NAME"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
       - name: Upload to release
         uses: softprops/action-gh-release@v2
         if: startsWith(github.ref, 'refs/tags/')
         with:
-          files: ${{ matrix.artifact }}
+          files: |
+            ${{ matrix.artifact }}
+            installer/installer-output/Setup-VideoGrab.exe
           generate_release_notes: true
 
       - name: Upload artifact (manual runs)
@@ -63,3 +77,10 @@ jobs:
         with:
           name: ${{ matrix.artifact }}
           path: ${{ matrix.artifact }}
+
+      - name: Upload installer artifact (manual runs, Windows)
+        if: github.ref != 'refs/tags/' && runner.os == 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: Setup-VideoGrab
+          path: installer/installer-output/Setup-VideoGrab.exe

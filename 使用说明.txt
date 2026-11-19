@@ -1,0 +1,75 @@
+﻿VideoGrab - 本地视频下载器（Windows 离线版）
+=============================================
+
+自带完整 Python 运行环境，不用装 Python，不用联网装依赖。
+
+目录说明
+--------
+  Start-VideoGrab.bat   直接运行（推荐先用这个）
+  Build-EXE.bat         把整个文件夹打包成单个 VideoGrab.exe
+  runtime\              内置的 Python 运行环境（别删）
+  app.py / static\      程序本体
+  downloads\            下载的视频会存在这里
+  buildtools\           打包 exe 用的离线工具（打完可删）
+
+
+一、怎么直接用（不用 exe）
+--------------------------
+1. 把整个文件夹解压出来（不要只解压单个文件）
+2. 双击  Start-VideoGrab.bat
+3. 首次运行会自动下载 ffmpeg（约 90MB，仅一次）
+4. 浏览器自动打开 http://localhost:8080
+5. 粘贴视频链接，选清晰度，点下载
+
+停止：关掉黑色命令行窗口。
+
+
+二、怎么生成单个 exe（想要"一个文件"的版本）
+--------------------------------------------
+1. 双击  Build-EXE.bat
+2. 等 2~5 分钟（窗口里会滚动编译日志）
+3. 完成后出现  dist\VideoGrab.exe
+
+这个 exe 是单文件的，约 30~40MB，可以单独拷到任何 Windows 电脑
+（同样不需要装 Python），双击即用，会自动开浏览器、自动建
+downloads 文件夹。
+
+注意：
+- 打包过程中两个窗口都别关。
+- 打出来的 exe 首次运行同样会自动下载 ffmpeg。
+- 杀毒软件对 PyInstaller 打包的程序常有误报，加白名单即可。
+- 打包失败的话，把窗口里的报错发出来，可以改用本文件夹直接运行
+  （Start-VideoGrab.bat），功能完全一样。
+
+
+三、常见问题
+------------
+Q: 双击后窗口一闪就没了？
+A: 多半是杀毒软件拦了 runtime\python.exe，把整个文件夹加入白名单。
+
+Q: 提示端口被占用？
+A: 命令行进入本目录运行：
+     runtime\python.exe app.py --port 3000
+   然后访问 http://localhost:3000
+
+Q: 手机也想访问？
+A: 手机和电脑连同一个 WiFi，运行：
+     runtime\python.exe app.py --host 0.0.0.0 --port 8080
+   手机浏览器打开  电脑IP:8080
+
+Q: 1080p 下载失败 / 转 MP3 失败？
+A: 检查文件夹里有没有 ffmpeg.exe；没有就重新双击启动（会自动补下载），
+   或手动下载放到本文件夹：
+   https://www.gyan.dev/ffmpeg/builds/
+
+Q: 提示解析失败、站点不支持？
+A: 更新 yt-dlp：命令行运行
+     runtime\python.exe -m pip install -U yt-dlp --target runtime\Lib\site-packages
+   （需要联网；或下载新版 yt_dlp 文件夹替换 runtime\Lib\site-packages\yt_dlp）
+
+
+四、隐私与边界
+--------------
+本工具完全本地运行：链接不经过任何第三方服务器，下载记录只在你电脑上。
+
+会员专属、付费、DRM 加密内容无法下载 —— 这是法律边界，工具不会绕过。

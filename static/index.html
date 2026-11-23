@@ -108,7 +108,13 @@ h1 span{background:linear-gradient(135deg,var(--acc),var(--acc2));-webkit-backgr
 .check input{accent-color:var(--acc);width:15px;height:15px;cursor:pointer}
 
 /* ── 结果 ── */
-.res-head{display:flex;gap:16px;margin-bottom:18px}
+.res-head{display:flex;gap:16px;margin-bottom:18px;align-items:flex-start}
+.res-actions{display:flex;flex-direction:column;gap:8px;flex-shrink:0;align-items:stretch}
+.res-actions .btn{justify-content:center;white-space:nowrap}
+@media(max-width:640px){
+  .res-head{flex-wrap:wrap}
+  .res-actions{flex-direction:row;width:100%;justify-content:flex-end;align-items:center}
+}
 .res-thumb{
   width:180px;height:101px;flex-shrink:0;border-radius:10px;overflow:hidden;
   background:var(--bg2);border:1px solid var(--line);display:grid;place-items:center;
@@ -334,6 +340,13 @@ footer a:hover{color:var(--acc)}
         <div class="res-title" id="rTitle"></div>
         <div class="res-sub" id="rSub"></div>
       </div>
+      <div class="res-actions">
+        <button class="btn" id="dlBtn" onclick="startDownload()">
+          <svg style="width:15px;height:15px;fill:currentColor" viewBox="0 0 24 24"><path d="M5 20h14v-2H5v2zM19 9h-4V3H9v6H5l7 7 7-7z"/></svg>
+          立即下载
+        </button>
+        <button class="btn btn-ghost btn-sm" onclick="cancelParse()">取消</button>
+      </div>
     </div>
 
     <div id="subLangBox" class="hidden" style="margin-bottom:16px">
@@ -344,15 +357,6 @@ footer a:hover{color:var(--acc)}
     <div style="font-size:12.5px;color:var(--dim);margin-bottom:9px">选择清晰度</div>
     <div id="fmtNotice"></div>
     <div class="fmt-grid" id="fmtGrid"></div>
-
-    <div class="divider"></div>
-    <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center">
-      <button class="btn" id="dlBtn" onclick="startDownload()">
-        <svg style="width:15px;height:15px;fill:currentColor" viewBox="0 0 24 24"><path d="M5 20h14v-2H5v2zM19 9h-4V3H9v6H5l7 7 7-7z"/></svg>
-        立即下载
-      </button>
-      <button class="btn btn-ghost btn-sm" onclick="cancelParse()">取消</button>
-    </div>
   </div>
 
   <!-- 任务队列 -->
